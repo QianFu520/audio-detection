@@ -40,7 +40,6 @@ evaluation_results/
 outputs/*
 !outputs/models/
 !outputs/models/**
-!outputs/labels_progress.csv
 
 # ============================================================
 # 7. Secrets and environment files

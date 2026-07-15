@@ -137,8 +137,146 @@ V2 was trained on 98,047 clips (92,850 meaningful + 5,197 not_meaningful). Class
 
 Every metric improved over v1. The val set now has 1,300 not_meaningful clips from all 6 recorders — a much more robust evaluation. Val loss stable throughout (0.0002–0.0022), no overfitting. Model weights saved to `outputs/models/tinycnn_v2.pth`.
 
+## Evaluation strategy: per-recorder audit before production labeling
+
+Val metrics alone are not sufficient to trust a model for production inference. All v2 val clips came from the same recordings that were used for labeling — the model has "seen" the acoustic conditions at those locations. Before using v2 to label the entire 505,880-clip unknown pool, we need to verify that its not_meaningful predictions are correct across all 6 recorders.
+
+**Why a val set is not enough:** every recorder/date combo in the dataset has at least some labeled clips (the minimum is ~500). So there is no truly "held-out" recorder. However, recorders with fewer labeled clips (e.g., Audio_Moth_4 March 17: 517 labeled out of 15,383 total) are the closest proxy — the model has seen very little from those locations.
+
+**Evaluation approach:**
+1. Run v2 on all 505,880 unknown clips → save `inference_v2.csv`
+2. Sample **10 clips per recorder** (60 total) from high-confidence not_meaningful predictions (prob ≥ 0.95) — this ensures all 6 locations are represented equally
+3. Listen to all 60 clips by ear and tag each as `background`, `meaningful`, or `unsure`
+4. Check per-recorder precision — if any recorder is below ~85%, it signals that v2 is making errors at that location and targeted negatives should be collected there before production labeling
+
+**Why equal sampling per recorder:** the v1 audit sampled 50 from AM3 and only 30 from all other recorders combined. This was biased toward AM3 and gave weak coverage of AM4, AM5, AM6. Equal per-recorder sampling catches location-specific failure modes.
+
+**Decision rule:**
+- All recorders ≥ 85% precision → proceed with production labeling using v2
+- Any recorder < 85% → investigate that recorder's predictions, collect targeted negatives, retrain v3
+
+## v2 audit results
+
+Ran v2 on all 505,880 unknown clips. Sampled 10 clips per recorder (60 total) from high-confidence not_meaningful predictions (prob ≥ 0.95) and tagged each by ear.
+
+| Recorder | Background | Meaningful | Precision |
+|---|---|---|---|
+| Audio_Moth_1 | 7/10 | 3 | 70% ← below threshold |
+| Audio_Moth_2 | 8/10 | 2 | 80% ← below threshold |
+| Audio_Moth_3 | 10/10 | 0 | 100% |
+| Audio_Moth_4 | 10/10 | 0 | 100% |
+| Audio_Moth_5 | 9/10 | 1 | 90% |
+| Audio_Moth_6 | 10/10 | 0 | 100% |
+| **Overall** | **54/60** | **6** | **90%** |
+
+AM3, AM4, AM5, AM6 all passed (≥ 85%). AM1 and AM2 failed.
+
+**What the false positives sounded like:** brief bird calls behind loud background noise (rain or strong insect chorus) — not very faint, not very clear, short duration. The model heard the dominant background and predicted not_meaningful, but the bird call was still audible underneath. Whether BirdNET would detect these calls through the heavy background is uncertain, making these genuine edge cases.
+
+**Initial decision:** raise threshold to 0.99 for AM1/AM2 and re-audit before labeling.
+
+### AM1/AM2 re-audit at prob ≥ 0.99
+
+Sampled 10 clips each from AM1 and AM2 at the stricter 0.99 threshold and tagged by ear.
+
+| Recorder | Background | Meaningful | Precision |
+|---|---|---|---|
+| Audio_Moth_1 | 9/10 | 1 | 90% ✓ passed |
+| Audio_Moth_2 | 9/10 | 1 | 90% ✓ passed |
+
+Both passed. The 2 remaining false positives were: one clip with a human voice, and one with a brief bird call — genuine edge cases at the boundary of detection.
+
+**Final thresholds:**
+- Audio_Moth_1, Audio_Moth_2: prob ≥ 0.99
+- Audio_Moth_3, Audio_Moth_4, Audio_Moth_5, Audio_Moth_6: prob ≥ 0.95
+
+**Final label counts after v2 inference labeling:**
+
+| Source | Clips |
+|---|---|
+| model_inference_v2 | 4,716 |
+| model_inference_v1 | 3,500 |
+| background_flatness | 2,903 |
+| background_energy | 94 |
+| **Total not_meaningful** | **11,213** |
+
+Labels remaining as unknown: 501,164.
+
+## Results: TinyCNN v3
+
+Trained on 130,153 clips (118,940 meaningful + 11,213 not_meaningful). Class ratio: ~10:1 (down from 18:1 in v2). `pos_weight` adjusted automatically to 0.097.
+
+| Metric | v1 | v2 | v3 |
+|---|---|---|---|
+| Val accuracy | 99.92% | 99.90% | 99.80% |
+| Not_meaningful precision | 96.9% | 98.3% | **98.0%** |
+| Not_meaningful recall | 99.5% | 99.6% | **100%** |
+| Not_meaningful F1 | 0.982 | 0.989 | **0.990** |
+| Val not_meaningful support | 600 | 1,300 | **2,243** |
+
+**Confusion matrix (validation set, 28,333 clips):**
+
+|  | Predicted not_meaningful | Predicted meaningful |
+|---|---|---|
+| Actual not_meaningful | 2,243 | 0 |
+| Actual meaningful | 46 | 26,044 |
+
+**Key improvement over v2:** recall reached 100% — zero not_meaningful clips missed. The trade-off is 46 meaningful clips incorrectly filtered (vs 23 in v2), but that is only 0.18% of meaningful clips. The val not_meaningful support nearly doubled (2,243 vs 1,300), making this the most trustworthy evaluation so far.
+
+Val loss was slightly noisier than v2 (0.0006–0.0027 across epochs vs a smoother curve in v2), likely due to the more acoustically diverse training data spanning all 6 recorders. No sign of overfitting. Model weights saved to `outputs/models/tinycnn_v3.pth`.
+
+## v3 audit results
+
+Ran v3 on all 501,164 unknown clips. Sampled 10 clips per recorder (60 total) from high-confidence not_meaningful predictions (prob ≥ 0.95) and tagged each by ear.
+
+| Recorder | Background | Meaningful | Precision |
+|---|---|---|---|
+| Audio_Moth_1 | 9/10 | 1 | 90% ✓ passed |
+| Audio_Moth_2 | 9/10 | 1 | 90% ✓ passed |
+| Audio_Moth_3 | 10/10 | 0 | 100% |
+| Audio_Moth_4 | 10/10 | 0 | 100% |
+| Audio_Moth_5 | 10/10 | 0 | 100% |
+| Audio_Moth_6 | 9/10 | 1 | 90% ✓ passed |
+| **Overall** | **57/60** | **3** | **95%** |
+
+All 6 recorders passed the 85% gate. Notably, AM1 improved from 70% → 90% and AM2 from 80% → 90% compared to the v2 audit at the same threshold — v3 is significantly better calibrated for those locations.
+
+**Final threshold: prob ≥ 0.95 for all recorders** (no per-recorder split needed).
+
+**Result:** 5,632 new not_meaningful clips labeled (source: `model_inference_v3`). Not_meaningful total increased from 11,213 to **16,845**. Unknown pool: 495,532.
+
+## Results: TinyCNN v4
+
+Trained on 135,785 clips (118,940 meaningful + 16,845 not_meaningful). Class ratio: ~7:1. `pos_weight`: 0.145.
+
+| Metric | v1 | v2 | v3 | v4 |
+|---|---|---|---|---|
+| Val accuracy | 99.92% | 99.90% | 99.80% | 99.61% |
+| Not_meaningful precision | 96.9% | 98.3% | **98.0%** | 96.7% |
+| Not_meaningful recall | 99.5% | 99.6% | **100%** | **100%** |
+| Not_meaningful F1 | 0.982 | 0.989 | **0.990** | 0.983 |
+| Val not_meaningful support | 600 | 1,300 | 2,243 | 3,369 |
+
+**Confusion matrix (validation set, 29,459 clips):**
+
+|  | Predicted not_meaningful | Predicted meaningful |
+|---|---|---|
+| Actual not_meaningful | 3,369 | 0 |
+| Actual meaningful | 116 | 25,974 |
+
+**V4 shows diminishing returns and slight regression.** Recall held at 100%, but precision dropped from 98.0% to 96.7% and F1 regressed from 0.990 to 0.983. The number of meaningful clips incorrectly filtered rose from 46 to 116. This is a known pattern in iterative self-labeling: each round introduces ~5% label noise, and after enough iterations that noise begins to accumulate and hurt precision.
+
+**Decision: v3 is the final production model.** V4 confirms the iterative loop has converged — adding more self-labeled data no longer improves the model. Model weights saved to `outputs/models/tinycnn_v4.pth` for reference.
+
+## Final model: TinyCNN v3
+
+- **Weights:** `outputs/models/tinycnn_v3.pth`
+- **Not_meaningful precision:** 98.0% — 2% of clips the model filters out are actually meaningful
+- **Not_meaningful recall:** 100% — no real background clip is missed
+- **F1:** 0.990
+- **Training data:** 11,213 not_meaningful + 118,940 meaningful (10:1 ratio)
+
 ## Next steps
 
-1. **Evaluate on truly unseen recordings** — test on a recorder/date combination not present in any labeled data to verify generalization across different Costa Rican rainforest locations
-2. **Further iteration if needed** — if evaluation on unseen data reveals failures, collect targeted negatives and retrain v3
-3. **Production scripts** — once the model is validated, write clean Python scripts for the full inference pipeline
+1. **Production scripts** — write clean Python scripts for the full inference pipeline using v3
+2. **Final inference run** — use v3 to label the remaining 495,532 unknown clips for downstream BirdNET processing
